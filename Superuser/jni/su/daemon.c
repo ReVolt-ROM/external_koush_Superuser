@@ -62,6 +62,10 @@ static void write_int(int fd, int val) {
 
 static char* read_string(int fd) {
     int len = read_int(fd);
+    if (len > PATH_MAX) {
+        LOGE("string too long");
+        exit(-1);
+    }
     char* val = malloc(sizeof(char) * (len + 1));
     val[len] = '\0';
     int amount = read(fd, val, len);
@@ -149,9 +153,7 @@ static int daemon_accept(int fd) {
     int i;
     for (i = 0; i < argc; i++) {
         argv[i] = read_string(fd);
-        LOGD("arg: %s", argv[i]);
     }
-    LOGD("args done");
 
     char errfile[PATH_MAX];
     char outfile[PATH_MAX];
@@ -183,7 +185,6 @@ static int daemon_accept(int fd) {
     int ptm = -1;
     char* devname = NULL;
     if (atty) {
-        LOGD("opening ptm");
         ptm = open("/dev/ptmx", O_RDWR);
         if (ptm <= 0) {
             PLOGE("ptm");
@@ -226,10 +227,10 @@ static int daemon_accept(int fd) {
     // and dup2 them with stdin/stdout, and run main, which execs
     // the target.
     if (child == 0) {
+        setsid();
         close(fd);
 
         if (devname != NULL) {
-            LOGD("opening pts");
             int pts = open(devname, O_RDWR);
             if(pts < 0) {
                 PLOGE("pts");
@@ -263,7 +264,6 @@ static int daemon_accept(int fd) {
     }
 
     if (devname != NULL) {
-        LOGD("pumping ptm");
         // pump ptm across the socket
         pump_async(infd, ptm);
         pump(ptm, outfd);
@@ -288,11 +288,11 @@ static int daemon_accept(int fd) {
 done:
     write(fd, &code, sizeof(int));
     close(fd);
-    return code;
+    LOGD("child exited");
+    exit(code);
 }
 
 int run_daemon() {
-    LOGD("starting su daemon");
     int fd;
     struct sockaddr_un sun;
 
@@ -300,6 +300,10 @@ int run_daemon() {
     if (fd < 0) {
         PLOGE("socket");
         return -1;
+    }
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC)) {
+        PLOGE("fcntl FD_CLOEXEC");
+        goto err;
     }
 
     memset(&sun, 0, sizeof(sun));
@@ -335,8 +339,7 @@ int run_daemon() {
     int client;
     while ((client = accept(fd, NULL, NULL)) > 0) {
         // dup/close?
-        LOGD("got client");
-        if (fork() == 0) {
+        if (fork_zero_fucks() == 0) {
             close(fd);
             return daemon_accept(client);
         }
@@ -370,6 +373,10 @@ int connect_daemon(int argc, char *argv[]) {
         PLOGE("socket");
         exit(-1);
     }
+    if (fcntl(socketfd, F_SETFD, FD_CLOEXEC)) {
+        PLOGE("fcntl FD_CLOEXEC");
+        exit(-1);
+    }
 
     memset(&sun, 0, sizeof(sun));
     sun.sun_family = AF_LOCAL;
@@ -380,21 +387,18 @@ int connect_daemon(int argc, char *argv[]) {
         exit(-1);
     }
 
-    LOGD("client is: %d", getpid());
+    LOGD("connecting client %d", getpid());
     write_int(socketfd, getpid());
     write_int(socketfd, isatty(STDIN_FILENO));
     write_int(socketfd, uid);
     write_int(socketfd, getppid());
     write_int(socketfd, argc);
-    LOGD("about to write args");
 
     int i;
     for (i = 0; i < argc; i++) {
-        LOGD("writing arg");
         write_string(socketfd, argv[i]);
     }
 
-    LOGD("waiting for server ack");
     // ack
     read_int(socketfd);
 
@@ -419,6 +423,6 @@ int connect_daemon(int argc, char *argv[]) {
     pump(outfd, STDOUT_FILENO);
 
     int code = read_int(socketfd);
-    LOGD("daemon client done %d", code);
+    LOGD("client exited %d", code);
     return code;
 }

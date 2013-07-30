@@ -67,15 +67,28 @@ unsigned get_radio_uid() {
   return ppwd->pw_uid;
 }
 
+int fork_zero_fucks() {
+    int pid = fork();
+    if (pid) {
+        int status;
+        waitpid(pid, &status, 0);
+        return pid;
+    }
+    else {
+        if (pid = fork())
+            exit(0);
+        return 0;
+    }
+}
+
 void exec_log(char *priority, char* logline) {
-  int pid;
-  if ((pid = fork()) == 0) {
-      int zero = open("/dev/zero", O_RDONLY | O_CLOEXEC);
-      int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
-      dup2(null, 0);
-      dup2(null, 1);
-      dup2(null, 2);
-      execl("/system/bin/log", "/system/bin/log", "-p", priority, "-t", LOG_TAG, logline);
+  if (fork_zero_fucks() == 0) {
+      int zero = open("/dev/zero", O_RDONLY);
+      int null = open("/dev/null", O_WRONLY);
+      dup2(zero, STDIN_FILENO);
+      dup2(null, STDOUT_FILENO);
+      dup2(null, STDERR_FILENO);
+      execl("/system/bin/log", "/system/bin/log", "-p", priority, "-t", LOG_TAG, logline, NULL);
       _exit(0);
   }
 }
@@ -370,7 +383,6 @@ static int socket_send_request(int fd, const struct su_context *ctx) {
 do {                                                \
     size_t __len = htonl(data_len);                 \
     __len = write((fd), &__len, sizeof(__len));     \
-    LOGE("%d", __len);\
     if (__len != sizeof(__len)) {                   \
         PLOGE("write(" #data ")");                  \
         return -1;                                  \
@@ -430,6 +442,7 @@ static void usage(int status) {
     fprintf(stream,
     "Usage: su [options] [--] [-] [LOGIN] [--] [args...]\n\n"
     "Options:\n"
+    "  --daemon                      start the su daemon agent\n"
     "  -c, --command COMMAND         pass COMMAND to the invoked shell\n"
     "  -h, --help                    display this help message and exit\n"
     "  -, -l, --login                pretend the shell to be a login shell\n"
@@ -537,7 +550,7 @@ static __attribute__ ((noreturn)) void allow(struct su_context *ctx) {
 }
 
 /*
- * CyanogenMod-specific behavior
+ * ReVolt-specific behavior
  *
  * we can't simply use the property service, since we aren't launched from init
  * and can't trust the location of the property workspace.
