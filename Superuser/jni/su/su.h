@@ -82,7 +82,7 @@
 #define str(a) #a
 
 #ifndef VERSION_CODE
-#define VERSION_CODE 10
+#define VERSION_CODE 12
 #endif
 #define VERSION xstr(VERSION_CODE) " " REQUESTOR
 
@@ -181,7 +181,7 @@ void exec_logd(const char* fmt, ...);
 int run_daemon();
 int connect_daemon(int argc, char *argv[]);
 // for when you give zero fucks about the state of the child process.
-// this verison of fork understands you don't care about the child.
+// this version of fork understands you don't care about the child.
 // deadbeat dad fork.
 int fork_zero_fucks();
 
