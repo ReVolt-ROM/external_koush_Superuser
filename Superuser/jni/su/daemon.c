@@ -38,7 +38,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include <termios.h>
+
+#ifdef SUPERUSER_EMBEDDED
 #include <cutils/multiuser.h>
+#endif
 
 #include "su.h"
 #include "utils.h"
@@ -95,6 +98,7 @@ static void write_string(int fd, char* val) {
     }
 }
 
+#ifdef SUPERUSER_EMBEDDED
 static void mount_emulated_storage(int user_id) {
     const char *emulated_source = getenv("EMULATED_STORAGE_SOURCE");
     const char *emulated_target = getenv("EMULATED_STORAGE_TARGET");
@@ -129,6 +133,7 @@ static void mount_emulated_storage(int user_id) {
         PLOGE("mount legacy path");
     }
 }
+#endif
 
 static int run_daemon_child(int infd, int outfd, int errfd, int argc, char** argv) {
     if (-1 == dup2(outfd, STDOUT_FILENO)) {
@@ -150,7 +155,7 @@ static int run_daemon_child(int infd, int outfd, int errfd, int argc, char** arg
     close(outfd);
     close(errfd);
 
-    return main(argc, argv);
+    return su_main(argc, argv, 0);
 }
 
 static void pump(int input, int output) {
@@ -187,13 +192,13 @@ static void pump_async(int input, int output) {
 static int daemon_accept(int fd) {
     is_daemon = 1;
     int pid = read_int(fd);
-    LOGD("remote pid: %d", pid);
+    LOGV("remote pid: %d", pid);
     int atty = read_int(fd);
-    LOGD("remote atty: %d", atty);
+    LOGV("remote atty: %d", atty);
     daemon_from_uid = read_int(fd);
-    LOGD("remote uid: %d", daemon_from_uid);
+    LOGV("remote uid: %d", daemon_from_uid);
     daemon_from_pid = read_int(fd);
-    LOGD("remote req pid: %d", daemon_from_pid);
+    LOGV("remote req pid: %d", daemon_from_pid);
 
     struct ucred credentials;
     int ucred_length = sizeof(struct ucred);
@@ -216,7 +221,7 @@ static int daemon_accept(int fd) {
         LOGE("unable to allocate args: %d", argc);
         exit(-1);
     }
-    LOGD("remote args: %d", argc);
+    LOGV("remote args: %d", argc);
     char** argv = (char**)malloc(sizeof(char*) * (argc + 1));
     argv[argc] = NULL;
     int i;
@@ -237,10 +242,13 @@ static int daemon_accept(int fd) {
     }
     if (mkfifo(errfile, 0660) != 0) {
         PLOGE("mkfifo %s", errfile);
+        unlink(outfile);
         exit(-1);
     }
     if (mkfifo(infile, 0660) != 0) {
         PLOGE("mkfifo %s", infile);
+        unlink(errfile);
+        unlink(outfile);
         exit(-1);
     }
 
@@ -260,31 +268,41 @@ static int daemon_accept(int fd) {
         ptm = open("/dev/ptmx", O_RDWR);
         if (ptm <= 0) {
             PLOGE("ptm");
-            exit(-1);
+            goto unlink_n_exit;
         }
         if(grantpt(ptm) || unlockpt(ptm) || ((devname = (char*) ptsname(ptm)) == 0)) {
             PLOGE("ptm setup");
             close(ptm);
+unlink_n_exit:
+            unlink(infile);
+            unlink(errfile);
+            unlink(outfile);
             exit(-1);
         }
-        LOGD("devname: %s", devname);
+        LOGV("devname: %s", devname);
     }
 
     int outfd = open(outfile, O_WRONLY);
     if (outfd <= 0) {
         PLOGE("outfd daemon %s", outfile);
-        goto done;
+        goto unlink_n_exit;
     }
     int errfd = open(errfile, O_WRONLY);
     if (errfd <= 0) {
         PLOGE("errfd daemon %s", errfile);
-        goto done;
+        goto unlink_n_exit;
     }
     int infd = open(infile, O_RDONLY);
     if (infd <= 0) {
         PLOGE("infd daemon %s", infile);
-        goto done;
+        goto unlink_n_exit;
     }
+
+    // Wait for client to open pipes, then remove
+    read_int(fd);
+    unlink(infile);
+    unlink(errfile);
+    unlink(outfile);
 
     int code;
     // now fork and run main, watch for the child pid exit, and send that
@@ -331,9 +349,11 @@ static int daemon_accept(int fd) {
             outfd = pts;
         }
 
+#ifdef SUPERUSER_EMBEDDED
         if (mount_storage) {
             mount_emulated_storage(multiuser_get_user_id(daemon_from_uid));
         }
+#endif
 
         return run_daemon_child(infd, outfd, errfd, argc, argv);
     }
@@ -352,9 +372,15 @@ static int daemon_accept(int fd) {
     // wait for the child to exit, and send the exit code
     // across the wire.
     int status;
-    LOGD("waiting for child exit");
+    LOGV("waiting for child exit");
     if (waitpid(child, &status, 0) > 0) {
-        code = WEXITSTATUS(status);
+        if (WIFEXITED(status)) {
+            code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            code = 128 + WTERMSIG(status);
+        } else {
+            code = -1;
+        }
     }
     else {
         code = -1;
@@ -363,11 +389,16 @@ static int daemon_accept(int fd) {
 done:
     write(fd, &code, sizeof(int));
     close(fd);
-    LOGD("child exited");
+    LOGV("child exited");
     return code;
 }
 
 int run_daemon() {
+    if (getuid() != 0 || getgid() != 0) {
+        PLOGE("daemon requires root. uid/gid not root");
+        return -1;
+    }
+
     int fd;
     struct sockaddr_un sun;
 
@@ -436,9 +467,6 @@ int connect_daemon(int argc, char *argv[]) {
     sprintf(outfile, "%s/%d.stdout", REQUESTOR_DAEMON_PATH, getpid());
     sprintf(errfile, "%s/%d.stderr", REQUESTOR_DAEMON_PATH, getpid());
     sprintf(infile, "%s/%d.stdin", REQUESTOR_DAEMON_PATH, getpid());
-    unlink(errfile);
-    unlink(infile);
-    unlink(outfile);
 
     struct sockaddr_un sun;
 
@@ -461,7 +489,7 @@ int connect_daemon(int argc, char *argv[]) {
         exit(-1);
     }
 
-    LOGD("connecting client %d", getpid());
+    LOGV("connecting client %d", getpid());
 
     int mount_storage = getenv("MOUNT_EMULATED_STORAGE") != NULL;
 
@@ -499,11 +527,19 @@ int connect_daemon(int argc, char *argv[]) {
         exit(-1);
     }
 
+    // notify daemon that the pipes are open.
+    write_int(socketfd, 1);
+
     pump_async(STDIN_FILENO, infd);
     pump_async(errfd, STDERR_FILENO);
     pump(outfd, STDOUT_FILENO);
 
+    close(infd);
+    close(errfd);
+    close(outfd);
+
     int code = read_int(socketfd);
+    close(socketfd);
     LOGD("client exited %d", code);
     return code;
 }
